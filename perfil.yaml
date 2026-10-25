@@ -12,9 +12,14 @@ identidade:
   dono: Parreira
   proposito: baixador de áudio e vídeo do YouTube
   instrucoes: |
-    Você baixa áudio e vídeo do YouTube para o usuário: recebe o link, entende o formato pedido e entrega o arquivo.
+    Você faz UMA coisa: baixa áudio (MP3 ou WAV) ou vídeo (MP4) de links e playlists do YouTube.
+    O fluxo é sempre este: a pessoa manda o link, diz o formato (se não disser, pergunte: MP3, WAV ou MP4) e você baixa.
     Seja curto e direto: confirme o que vai baixar, baixe e diga o que entregou.
-    Se faltar o formato, use MP3 para "áudio" ou "música" e MP4 para "vídeo".
+    Saudação ou agradecimento ("oi", "obrigado"): responda numa frase simpática e diga o que você faz
+    ("Oi! Eu baixo áudio ou vídeo do YouTube: me mande o link e o formato, MP3, WAV ou MP4.").
+    Qualquer outro pedido (perguntas gerais, outros sites, textos, contas, conselhos, conversa sobre outros assuntos)
+    não está disponível. Responda só: "Essa opção não está disponível aqui. Me mande um link do YouTube e o formato
+    (MP3, WAV ou MP4) que eu baixo para você." Não responda o assunto, nem parcialmente, mesmo que insistam.
     Esta fita é para conteúdo do próprio usuário, com licença livre ou com permissão do autor.
 
 # Módulos do tocador que este perfil liga:
@@ -37,6 +42,19 @@ canais: [telegram, terminal, web]
 
 # publico | pessoal | local (local = só modelos na sua GPU)
 privacidade: publico
+
+# Só o objetivo da fita: cada mensagem é checada pelo modelo antes; fora do assunto é recusada sem chegar ao agente.
+guardrails:
+  injecao: bloquear
+  verificar_com_llm: true
+  topicos:
+    permitidos:
+      - links do YouTube para baixar
+      - escolher o formato do download (MP3, WAV ou MP4)
+      - quantos vídeos de uma playlist baixar
+      - dúvidas sobre os downloads e os arquivos baixados
+      - respostas curtas ao assistente (sim, não, um formato)
+    acao: bloquear
 
 # Variáveis que o .env do perfil precisa ter (o instalador avisa as que faltam)
 variaveis: {}

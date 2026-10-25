@@ -30,7 +30,7 @@ identidade:
 #   midia        Downloads do YouTube: áudio (MP3/WAV) ou vídeo (MP4) de links e playlists (serviço yt-dlp em Docker)
 modulos:
   midia: {}      # baixar_youtube: MP3, WAV ou MP4, de um link ou de uma playlist
-  arquivos: {}   # listar e consultar o que já foi baixado (workspace/rebobina/downloads)
+  # arquivos fica de fora: no chat público, listaria os downloads de todos os visitantes
 
 # Canais: telegram, terminal, web (chat no navegador). O telegram usa o bot do .env da fita ou, sem ele, o do tocador.
 canais: [telegram, terminal, web]

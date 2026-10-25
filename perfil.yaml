@@ -1,0 +1,42 @@
+# Manifesto do perfil "rebobina" (spec profiles-modules RF-03).
+# Perfis são só conteúdo: nada aqui é executado.
+nome: rebobina
+versao: 0.1.0
+descricao: Baixa áudio (MP3 ou WAV) ou vídeo (MP4) de links e playlists do YouTube e entrega os arquivos.
+requer:
+  tocador: ">=1.0"
+
+identidade:
+  nome: Rebobina
+  emoji: 🎧
+  dono: Parreira
+  proposito: baixador de áudio e vídeo do YouTube
+  instrucoes: |
+    Você baixa áudio e vídeo do YouTube para o usuário: recebe o link, entende o formato pedido e entrega o arquivo.
+    Seja curto e direto: confirme o que vai baixar, baixe e diga o que entregou.
+    Se faltar o formato, use MP3 para "áudio" ou "música" e MP4 para "vídeo".
+    Esta fita é para conteúdo do próprio usuário, com licença livre ou com permissão do autor.
+
+# Módulos do tocador que este perfil liga:
+#   arquivos     Ferramentas de arquivos no workspace (criar, ler, listar)
+#   voz          Mensagens de voz: transcrição (Whisper) e respostas em áudio (Kokoro/Edge)
+#   voz-clonada  Clonagem de voz (Chatterbox): /minhavoz, /falar e skill voz-clonada
+#   refinamento  Raciocínio: criador ↔ crítico, análise em etapas, debate entre agentes e criador de prompts
+#   http         Ferramentas HTTP declaradas pelo perfil em ferramentas/*.yaml (APIs REST, sem código)
+#   pesquisa-web Pesquisa na internet, leitura de páginas e notícias (SearXNG/DuckDuckGo, Google News)
+#   anexos       Imagens e documentos enviados: visão, OCR, biblioteca com busca (listar_anexos, ler_anexo...)
+#   imagens      Geração de imagens na GPU (ComfyUI + SDXL): ilustração, HQ, anime e mangá
+#   conhecimento Base de conhecimento (RAG): documentos da fita em conhecimento/, busca híbrida e citações
+#   midia        Downloads do YouTube: áudio (MP3/WAV) ou vídeo (MP4) de links e playlists (serviço yt-dlp em Docker)
+modulos:
+  midia: {}      # baixar_youtube: MP3, WAV ou MP4, de um link ou de uma playlist
+  arquivos: {}   # listar e consultar o que já foi baixado (workspace/rebobina/downloads)
+
+# Canais: telegram, terminal, web (chat no navegador). O telegram usa o bot do .env da fita ou, sem ele, o do tocador.
+canais: [telegram, terminal, web]
+
+# publico | pessoal | local (local = só modelos na sua GPU)
+privacidade: local
+
+# Variáveis que o .env do perfil precisa ter (o instalador avisa as que faltam)
+variaveis: {}

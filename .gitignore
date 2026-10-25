@@ -1,0 +1,14 @@
+.env
+dados/
+tmp/
+
+# Amostras de voz, áudios e vídeos nunca vão para o git
+*.wav
+*.ogg
+*.oga
+*.opus
+*.mp3
+*.m4a
+*.flac
+*.mp4
+*.webm

@@ -43,6 +43,9 @@ canais: [telegram, terminal, web]
 # publico | pessoal | local (local = só modelos na sua GPU)
 privacidade: publico
 
+# Aparece no site do K7 (npm run site) para qualquer visitante escolher.
+vitrine: true
+
 # Só o objetivo da fita: cada mensagem é checada pelo modelo antes; fora do assunto é recusada sem chegar ao agente.
 guardrails:
   injecao: bloquear

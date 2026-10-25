@@ -24,11 +24,17 @@ npm run dev -- --perfil rebobina    # Telegram (usa o bot do .env desta fita ou,
 
 - "baixa em mp3 https://youtu.be/..."
 - "quero esse vídeo em mp4: https://www.youtube.com/watch?v=..."
-- "baixa os 10 primeiros áudios dessa playlist em wav: https://www.youtube.com/playlist?list=..."
+- "baixa essa playlist inteira em mp3: https://www.youtube.com/playlist?list=..."
+- "só os 10 primeiros dessa playlist, em wav: https://www.youtube.com/playlist?list=..."
 
 Os arquivos ficam em `workspace/rebobina/downloads` no K7. No Telegram, áudio chega como música e vídeo como vídeo.
 Bots do Telegram só enviam até **50 MB**: acima disso, o bot avisa onde o arquivo ficou salvo no computador.
-Playlists: até 25 vídeos por pedido (`MIDIA_MAX_ITENS` no `.env` do tocador, até 200).
+Playlists: inteiras por padrão (`MIDIA_MAX_ITENS` no `.env` do tocador põe um teto, se quiser).
+Vídeos excluídos, privados ou bloqueados são pulados e listados no fim, com o link e o motivo.
+Nomes padronizados, sem numeração e sem "(Official Video)" e afins.
+
+No navegador, quando vierem vários arquivos: **Baixar tudo (.zip)** ou, no Chrome/Edge em `localhost`,
+**Salvar numa pasta…** (você escolhe a pasta e as músicas vão direto para ela).
 
 ## Direitos
 

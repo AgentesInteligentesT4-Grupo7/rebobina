@@ -36,7 +36,7 @@ modulos:
 canais: [telegram, terminal, web]
 
 # publico | pessoal | local (local = só modelos na sua GPU)
-privacidade: local
+privacidade: publico
 
 # Variáveis que o .env do perfil precisa ter (o instalador avisa as que faltam)
 variaveis: {}

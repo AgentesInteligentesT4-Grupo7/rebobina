@@ -1,7 +1,7 @@
 # Manifesto do perfil "rebobina" (spec profiles-modules RF-03).
-# Perfis são só conteúdo: nada aqui é executado.
+# O código da fita (downloads, biblioteca, player, nivelar, padronizar) fica em extensao/; o tocador não tem nada disso.
 nome: rebobina
-versao: 0.1.0
+versao: 0.2.0
 descricao: Baixa áudio (MP3 ou WAV) ou vídeo (MP4) de links e playlists do YouTube e entrega os arquivos.
 requer:
   tocador: ">=1.0"
@@ -22,20 +22,12 @@ identidade:
     (MP3, WAV ou MP4) que eu baixo para você." Não responda o assunto, nem parcialmente, mesmo que insistam.
     Esta fita é para conteúdo do próprio usuário, com licença livre ou com permissão do autor.
 
-# Módulos do tocador que este perfil liga:
-#   arquivos     Ferramentas de arquivos no workspace (criar, ler, listar)
-#   voz          Mensagens de voz: transcrição (Whisper) e respostas em áudio (Kokoro/Edge)
-#   voz-clonada  Clonagem de voz (Chatterbox): /minhavoz, /falar e skill voz-clonada
-#   refinamento  Raciocínio: criador ↔ crítico, análise em etapas, debate entre agentes e criador de prompts
-#   http         Ferramentas HTTP declaradas pelo perfil em ferramentas/*.yaml (APIs REST, sem código)
-#   pesquisa-web Pesquisa na internet, leitura de páginas e notícias (SearXNG/DuckDuckGo, Google News)
-#   anexos       Imagens e documentos enviados: visão, OCR, biblioteca com busca (listar_anexos, ler_anexo...)
-#   imagens      Geração de imagens na GPU (ComfyUI + SDXL): ilustração, HQ, anime e mangá
-#   conhecimento Base de conhecimento (RAG): documentos da fita em conhecimento/, busca híbrida e citações
-#   midia        Downloads do YouTube: áudio (MP3/WAV) ou vídeo (MP4) de links e playlists (serviço yt-dlp em Docker)
-modulos:
-  midia: {}      # baixar_youtube: MP3, WAV ou MP4, de um link ou de uma playlist
-  # arquivos fica de fora: no chat público, listaria os downloads de todos os visitantes
+# Nenhum módulo do tocador: tudo o que a Rebobina faz vem da extensão desta fita.
+# (arquivos fica de fora: no chat público, listaria os downloads de todos os visitantes)
+modulos: {}
+
+# baixar_youtube, a biblioteca e o player no chat web, nivelar e padronizar (serviço em servicos/ytdlp)
+extensao: extensao/index.ts
 
 # Canais: telegram, terminal, web (chat no navegador). O telegram usa o bot do .env da fita ou, sem ele, o do tocador.
 canais: [telegram, terminal, web]

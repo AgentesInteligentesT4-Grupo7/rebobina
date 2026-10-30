@@ -42,6 +42,16 @@ export class K7Falso {
         limitador: () => ({ run: (_chave, tarefa) => tarefa() }),
         emParalelo: (itens, _max, tarefa) => Promise.all(itens.map(tarefa)),
       },
+      processoPrincipal: false,
+      tarefa: () => undefined,
+      sql: { exec: () => undefined, run: () => ({ changes: 0, lastInsertRowid: 0 }), get: () => undefined, all: () => [], transacao: (fn) => fn() },
+      telegram: {
+        comando: () => undefined,
+        aoLocalizacao: () => undefined,
+        botoes: () => undefined,
+        notificar: async () => ({ entregue: false, erro: 'sem Telegram nos testes' }),
+        acessos: { listar: () => [], definir: () => false, convite: async () => Promise.reject(new Error('sem Telegram nos testes')) },
+      },
     };
   }
 
@@ -57,7 +67,7 @@ export class K7Falso {
 
   private async atender(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://local');
-    const json = (dados: unknown, status = 200) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(dados));
+    const json = (dados: unknown, status = 200): void => void res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(dados));
     try {
       const rota = this.rotas.find((r) => r.metodo === req.method && r.caminho.test(url.pathname));
       if (!rota) return json({ erro: 'Não encontrado' }, 404);

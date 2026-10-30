@@ -14,7 +14,7 @@ import { PLAYLIST, fakeClient } from './servico-falso.js';
 function fakeCtx(userId?: string): FitaToolCtx & { media: Array<[string, string]>; progress: string[] } {
   const media: Array<[string, string]> = [];
   const progress: string[] = [];
-  return { ...(userId ? { userId } : {}), media, progress, progresso: (t) => void progress.push(t), limparProgresso: () => undefined, anexarMidia: (p, k) => void media.push([p, k]) };
+  return { ...(userId ? { userId } : {}), media, progress, progresso: (t) => void progress.push(t), limparProgresso: () => undefined, anexarMidia: (p, k) => void media.push([p, k]), anexarImagem: () => undefined };
 }
 
 describe('Ferramenta baixar_youtube', () => {

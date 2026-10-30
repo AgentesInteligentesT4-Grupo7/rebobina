@@ -43,6 +43,7 @@ export class K7Falso {
         emParalelo: (itens, _max, tarefa) => Promise.all(itens.map(tarefa)),
         lerYaml: () => ({}),
         svgParaPng: async () => Buffer.from(''),
+        htmlParaPng: async () => Buffer.from(''),
       },
       processoPrincipal: false,
       tarefa: () => undefined,

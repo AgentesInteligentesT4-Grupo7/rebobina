@@ -41,6 +41,7 @@ export class K7Falso {
       util: {
         limitador: () => ({ run: (_chave, tarefa) => tarefa() }),
         emParalelo: (itens, _max, tarefa) => Promise.all(itens.map(tarefa)),
+        lerYaml: () => ({}),
       },
       processoPrincipal: false,
       tarefa: () => undefined,

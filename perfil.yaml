@@ -30,6 +30,9 @@ modulos: {}
 extensao: extensao/index.ts
 
 # Canais: telegram, terminal, web (chat no navegador). O telegram usa o bot do .env da fita ou, sem ele, o do tocador.
+# foco: restrito = só o propósito da fita; outro assunto recebe "isso este bot não faz", o que ele faz e exemplos.
+foco: restrito
+
 canais: [telegram, terminal, web]
 
 # publico | pessoal | local (local = só modelos na sua GPU)

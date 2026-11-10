@@ -20,6 +20,8 @@ services:
       NIVELAR_PARALELO: "${NIVELAR_PARALELO:-}"
       # MP3/WAV saem já nivelados (−14 LUFS) do download. 0 desliga.
       NIVELAR_AO_BAIXAR: "${NIVELAR_AO_BAIXAR:-1}"
+      # Volume alvo do nivelamento, em LUFS (-14 = padrão das plataformas de música).
+      NIVELAR_LUFS: "${NIVELAR_LUFS:--14}"
     volumes:
       - ytdlp-downloads:/downloads
     restart: unless-stopped

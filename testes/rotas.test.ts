@@ -39,15 +39,15 @@ const ANA = 'visitante-ana-0000000000000001';
 const BETO = 'visitante-beto-000000000000002';
 
 describe('Extensão: o que a fita registra no tocador', () => {
-  it('ferramenta baixar_youtube, rotas em /api/x/ e o painel; o paralelismo vem do serviço', async () => {
+  it('ferramentas baixar_youtube e procurar_youtube, rotas em /api/x/ e o painel; o paralelismo vem do serviço', async () => {
     const service = fakeLeveler();
     const url = await listen(service);
     try {
       const k7 = new K7Falso({ workspaceDir: fs.mkdtempSync(path.join(os.tmpdir(), 'rebobina-')) });
       await ativar(k7.api({ YTDLP_BASE_URL: `${url}/` }));
-      assert.deepEqual(k7.ferramentas.map((t) => t.name), ['baixar_youtube']);
+      assert.deepEqual(k7.ferramentas.map((t) => t.name), ['baixar_youtube', 'procurar_youtube']);
       assert.ok(k7.rotas.every((r) => r.caminho.source.startsWith('^\\/api\\/x\\/')));
-      assert.deepEqual(k7.painel, { script: 'web/painel.js', estilo: 'web/painel.css' });
+      assert.deepEqual(k7.painel, { script: 'web/painel.js', estilo: 'web/painel.css', imagens: ['https://i.ytimg.com'], quadros: ['https://www.youtube-nocookie.com'] });
       const base = await k7.ouvir();
       try {
         assert.deepEqual(await (await fetch(`${base}/api/x/info`, { headers: { 'x-visitante': ANA } })).json(), { nivelar: true, nivelarParalelo: 3 });

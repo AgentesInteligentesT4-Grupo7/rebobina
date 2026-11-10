@@ -30,7 +30,8 @@ export interface FitaApi {
     /** Rota da API do chat web. O caminho precisa começar com `/api/x/` (espaço das extensões). */
     rota(metodo: 'GET' | 'POST' | 'DELETE', caminho: RegExp, handler: (ctx: WebRotaCtx) => Promise<void> | void, opcoes?: { visitante?: boolean }): void;
     /** Script e estilo (arquivos da fita) incluídos na página do chat; o script recebe `window.K7`. */
-    painel(arquivos: { script?: string; estilo?: string }): void;
+    /** `imagens`/`quadros`: origens https de fora que a página pode mostrar (miniaturas, player de vídeo). */
+    painel(arquivos: { script?: string; estilo?: string; imagens?: string[]; quadros?: string[] }): void;
   };
   /** Comando de linha de comando: `npm run fita -- <fita> <comando> [args]`. */
   comando(nome: string, descricao: string, executar: (args: string[]) => Promise<void>): void;

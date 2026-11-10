@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, it } from 'node:test';
-import { baixarYoutube } from '../extensao/BaixarYoutube.js';
+import { baixarYoutube, planDownloads } from '../extensao/BaixarYoutube.js';
 import type { FitaToolCtx } from '../extensao/k7.js';
 import { MediaDownloader } from '../extensao/MediaDownloader.js';
 import { MediaLibrary } from '../extensao/MediaLibrary.js';
@@ -125,3 +125,79 @@ describe('Downloads: biblioteca crescendo, vários links e tentar de novo', () =
   });
 });
 
+
+describe('Ferramenta baixar_youtube: nivelado e alternativas', () => {
+  it('conta quantos saíram nivelados e lista o que veio de outro vídeo (original → usado)', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'midia-ws-'));
+    const client = {
+      download: async (_request: unknown, targetDir: string) => {
+        fs.mkdirSync(targetDir, { recursive: true });
+        const files = ['Um - Exemplo.mp3', 'Dois - Exemplo.mp3'].map((name, i) => {
+          const file = path.join(targetDir, name);
+          fs.writeFileSync(file, name);
+          return { path: file, id: i ? 'BBBBBBBBBBB' : 'AAAAAAAAAAA', nivelado: true };
+        });
+        return {
+          files,
+          failures: [],
+          alternatives: [{ link: 'https://youtu.be/BBBBBBBBBBB', usado: 'https://youtu.be/CCCCCCCCCCC', titulo: 'Dois (Ao Vivo)' }],
+          skipped: [],
+          order: ['AAAAAAAAAAA', 'BBBBBBBBBBB'],
+        };
+      },
+    } as unknown as YtdlpClient;
+    const library = new MediaLibrary(workspace);
+    const tool = baixarYoutube(new MediaDownloader(client, workspace, library), 0, () => undefined);
+    const text = await tool.run({ links: ['https://youtu.be/AAAAAAAAAAA', 'https://youtu.be/BBBBBBBBBBB'], formato: 'mp3' }, fakeCtx('web-1'));
+    assert.match(text, /volume nivelado \(−14 LUFS\) em todos os novos/);
+    assert.match(text, /1 áudio\(s\) não baixaram do link original[\s\S]*- https:\/\/youtu\.be\/BBBBBBBBBBB → https:\/\/youtu\.be\/CCCCCCCCCCC \(Dois \(Ao Vivo\)\)/);
+    assert.equal(library.list('web-1')[0]!.nivelada, true, 'tudo nivelado no download: o botão de nivelar some');
+  });
+});
+
+describe('Várias playlists num pedido', () => {
+  it('planDownloads: cada playlist é um download; vídeos avulsos vão juntos; playlist no meio dos links conta como playlist', () => {
+    assert.deepEqual(
+      planDownloads({
+        links: ['https://youtu.be/AAAAAAAAAAA', 'https://www.youtube.com/playlist?list=PL1', 'https://youtu.be/BBBBBBBBBBB'],
+        playlists: ['https://www.youtube.com/playlist?list=PL2', 'https://www.youtube.com/playlist?list=PL1'],
+      }),
+      [
+        { url: 'https://www.youtube.com/playlist?list=PL1', playlist: true },
+        { url: 'https://www.youtube.com/playlist?list=PL2', playlist: true },
+        { links: ['https://youtu.be/AAAAAAAAAAA', 'https://youtu.be/BBBBBBBBBBB'], playlist: false },
+      ],
+    );
+    assert.throws(() => planDownloads({ playlists: ['https://vimeo.com/x'] }), /Só links do YouTube|Error/);
+  });
+
+  it('baixa uma playlist depois da outra, cada uma na própria entrada; a que não abre não para as outras', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'midia-varias-'));
+    const calls: Array<{ url?: string }> = [];
+    const client = {
+      download: async (request: { url?: string }, targetDir: string, onProgress?: (p: string) => void) => {
+        calls.push(request);
+        onProgress?.('0/1');
+        if (request.url?.endsWith('QUEBRADA')) throw new Error('playlist privada');
+        fs.mkdirSync(targetDir, { recursive: true });
+        const id = request.url!.endsWith('PL1') ? 'AAAAAAAAAAA' : 'BBBBBBBBBBB';
+        const file = path.join(targetDir, `${id}.mp3`);
+        fs.writeFileSync(file, id);
+        return { files: [{ path: file, id }], failures: [], skipped: [], title: `Lista ${id.slice(0, 1)}`, order: [id] };
+      },
+    } as unknown as YtdlpClient;
+    const library = new MediaLibrary(workspace);
+    const tool = baixarYoutube(new MediaDownloader(client, workspace, library), 0, () => undefined);
+    const ctx = fakeCtx('web-2');
+    const text = await tool.run(
+      { playlists: ['https://www.youtube.com/playlist?list=PL1', 'https://www.youtube.com/playlist?list=QUEBRADA', 'https://www.youtube.com/playlist?list=PL2'] },
+      ctx,
+    );
+    assert.equal(calls.length, 3);
+    assert.deepEqual(library.list('web-2').map((e) => e.titulo).sort(), ['Lista A', 'Lista B']);
+    assert.equal(ctx.media.length, 2);
+    assert.match(text, /Por playlist:[\s\S]*Lista A: 1 arquivo/);
+    assert.match(text, /QUEBRADA: playlist privada/);
+    assert.ok(ctx.progress.some((p) => p.startsWith('📀 3 de 3 · ')), 'o andamento diz qual playlist está baixando');
+  });
+});

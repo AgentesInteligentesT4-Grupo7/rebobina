@@ -18,6 +18,8 @@ services:
       YTDLP_PARALELO: "${YTDLP_PARALELO:-3}"
       # Músicas niveladas ao mesmo tempo. Vazio = automático (núcleos da máquina menos 2); um número força.
       NIVELAR_PARALELO: "${NIVELAR_PARALELO:-}"
+      # MP3/WAV saem já nivelados (−14 LUFS) do download. 0 desliga.
+      NIVELAR_AO_BAIXAR: "${NIVELAR_AO_BAIXAR:-1}"
     volumes:
       - ytdlp-downloads:/downloads
     restart: unless-stopped

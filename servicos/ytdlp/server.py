@@ -2,6 +2,9 @@
 
 - POST /baixar {url, formato: mp3|wav|mp4, playlist, max_itens?} → {id}; o download roda em segundo plano.
   Sem max_itens, a playlist inteira.
+  Áudio sai já com nome "Título - Artista", etiquetas e volume nivelado (−14 LUFS); o que não baixar é procurado
+  pelo título em outro vídeo da mesma música ("alternativas").
+- GET /pesquisar?q=...&n=5 → vídeos do YouTube para um texto (nome da música, artista), sem baixar.
 - GET /trabalhos/{id} → status (rodando | ok | erro), progresso e arquivos prontos.
 - GET /trabalhos/{id}/arquivos/{nome} → o arquivo; DELETE /trabalhos/{id} → apaga a pasta do trabalho.
 Só aceita links do YouTube. Os arquivos ficam em /downloads/<id>/ até o K7 copiá-los e apagar.
@@ -16,6 +19,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import quote, urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 import asyncio
 import json
@@ -52,6 +57,8 @@ class DownloadRequest(BaseModel):
     max_itens: int | None = Field(None, ge=1)  # None = a playlist inteira
     # IDs dos vídeos (11 caracteres do link) que o K7 já tem neste formato: não são baixados de novo.
     pular: list[str] = Field(default_factory=list)
+    # Áudio que não baixou: procura pelo título outro vídeo da mesma música (duração parecida) e baixa dele.
+    alternativas: bool = True
 
 
 def read_tags(path: Path) -> dict:
@@ -64,10 +71,14 @@ def read_tags(path: Path) -> dict:
     return {str(k).lower(): v for k, v in tags.items()}
 
 
+def tag_args(title: str, artist: str | None) -> list[str]:
+    """Argumentos do ffmpeg com título, artista e a marca encoded_by=K7 (arquivo já padronizado)."""
+    return ["-metadata", f"title={title}", "-metadata", f"artist={artist or ''}", "-metadata", "encoded_by=K7"]
+
+
 def write_tags(source: Path, target: Path, title: str, artist: str | None) -> None:
     """Grava título e artista (e a marca encoded_by=K7) sem mexer no áudio nem no vídeo (cópia direta)."""
-    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(source), "-map", "0", "-c", "copy", "-map_metadata", "0",
-            "-metadata", f"title={title}", "-metadata", f"artist={artist or ''}", "-metadata", "encoded_by=K7"]
+    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(source), "-map", "0", "-c", "copy", "-map_metadata", "0", *tag_args(title, artist)]
     if source.suffix.lower() == ".mp3":
         args += ["-id3v2_version", "3"]
     run = subprocess.run([*args, str(target)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
@@ -137,20 +148,28 @@ def options(job_id: str, req: DownloadRequest) -> dict:
         "logger": JobLogger(job_id),
         "quiet": True,
         "noprogress": True,
-        "postprocessor_hooks": [lambda d: on_postprocess(job_id, d)],
     }
     if req.formato == "mp4":
         opts["format"] = "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*[height<=1080]+ba/b"
         opts["merge_output_format"] = "mp4"
     else:
-        codec = {"mp3": {"preferredcodec": "mp3", "preferredquality": "192"}, "wav": {"preferredcodec": "wav"}}[req.formato]
+        # Áudio: baixa o original (opus/m4a) e on_postprocess converte uma vez só para MP3/WAV, já nivelado e com
+        # nome e etiquetas padronizados (converter para MP3 e nivelar depois comprimiria o áudio duas vezes).
         opts["format"] = "bestaudio/best"
-        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", **codec}, {"key": "FFmpegMetadata"}]
+        opts["postprocessors"] = [{"key": "FFmpegMetadata"}]
+    opts["postprocessor_hooks"] = [lambda d: on_postprocess(job_id, d, req.formato)]
     return opts
 
 
-def on_postprocess(job_id: str, d: dict) -> None:
-    """MoveFiles é o último passo (extensão final): o arquivo ganha "Título - Artista" e as etiquetas.
+# Volume nivelado já no download (MP3/WAV). NIVELAR_AO_BAIXAR=0 desliga (o áudio sai como veio do YouTube).
+LEVEL_ON_DOWNLOAD = os.environ.get("NIVELAR_AO_BAIXAR", "1").strip().lower() not in {"0", "false", "nao", "não", "off"}
+# Nomes finais sendo gerados agora: duas músicas com o mesmo nome padronizado esperam uma pela outra.
+in_progress: set[Path] = set()
+
+
+def on_postprocess(job_id: str, d: dict, formato: str) -> None:
+    """MoveFiles é o último passo do yt-dlp: o arquivo ganha "Título - Artista", as etiquetas e, no áudio, o volume
+    nivelado (−14 LUFS), tudo antes de ser entregue.
 
     Dois vídeos com o mesmo nome padronizado são a mesma música: fica um arquivo só (sem "(2)").
     """
@@ -163,41 +182,241 @@ def on_postprocess(job_id: str, d: dict) -> None:
     # Com artista e faixa informados pelo YouTube (YouTube Music), eles valem mais que o título do vídeo.
     source = f"{info['artist']} - {info['track']}" if info.get("artist") and info.get("track") else (info.get("title") or path.stem)
     title, artist = standardize(source)
-    with lock:
-        target = path.parent / f"{standard_filename(title, artist)}{path.suffix}"
-        duplicate = target.exists() and target != path
-        if not duplicate:
-            path = path.rename(target)
+    ext = path.suffix if formato == "mp4" else f".{formato}"
+    target = path.parent / f"{standard_filename(title, artist)}{ext}"
+    while True:
+        with lock:
+            if target not in in_progress:
+                duplicate = target.exists() and target != path
+                if not duplicate:
+                    in_progress.add(target)
+                break
+        time.sleep(0.5)
+    leveled = False
     if duplicate:
         path.unlink(missing_ok=True)
-        path = target
     else:
-        tagged = path.with_name(f".etiquetas-{uuid.uuid4().hex}{path.suffix}")
         try:
-            write_tags(path, tagged, title, artist)
-            os.replace(tagged, path)
-        except Exception:  # noqa: BLE001 - sem etiqueta, o arquivo continua bom
-            tagged.unlink(missing_ok=True)
+            if formato == "mp4":
+                path = path.rename(target)
+                tagged = path.with_name(f".etiquetas-{uuid.uuid4().hex}{path.suffix}")
+                try:
+                    write_tags(path, tagged, title, artist)
+                    os.replace(tagged, path)
+                except Exception:  # noqa: BLE001 - sem etiqueta, o arquivo continua bom
+                    tagged.unlink(missing_ok=True)
+            else:
+                leveled = deliver_audio(path, target, title, artist)
+        except Exception as error:  # noqa: BLE001 - a conversão falhou: vira falha do vídeo, os outros seguem
+            path.unlink(missing_ok=True)
+            with lock:
+                jobs[job_id]["falhas"].append({"link": f"https://youtu.be/{info.get('id')}", "motivo": f"não consegui converter o áudio ({str(error)[:120]})"})
+            return
+        finally:
+            with lock:
+                in_progress.discard(target)
     with lock:
-        jobs[job_id]["arquivos"].append({"nome": path.name, "id": info.get("id"), "titulo": title, "bytes": path.stat().st_size})
+        job = jobs[job_id]
+        # Alternativa achada pelo título: o arquivo conta como o vídeo original (ordem da playlist e "já baixado").
+        video_id = job.get("trocas", {}).get(info.get("id"), info.get("id"))
+        job["arquivos"].append({"nome": target.name, "id": video_id, "titulo": title, "bytes": target.stat().st_size, "nivelado": leveled})
+
+
+def deliver_audio(source: Path, target: Path, title: str, artist: str | None) -> bool:
+    """Original do YouTube → MP3/WAV numa conversão só, nivelado e etiquetado. Devolve se o volume foi nivelado.
+
+    Se o nivelamento falhar, converte sem ele (a música chega, só sem o ajuste de volume).
+    """
+    tags = tag_args(title, artist)
+    temp = target.with_name(f".k7-{uuid.uuid4().hex}{target.suffix}")
+    leveled = False
+    try:
+        if LEVEL_ON_DOWNLOAD:
+            try:
+                in_slot(lambda s, t, cancel: level_file(s, t, cancel, tags), source, temp, threading.Event())
+                leveled = True
+            except Exception:  # noqa: BLE001 - segue para a conversão simples
+                temp.unlink(missing_ok=True)
+        if not leveled:
+            encode(source, temp, threading.Event(), tags=tags)
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+    if source != target:
+        source.unlink(missing_ok=True)
+    return leveled
 
 
 VIDEO_ID = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/)([\w-]{11})")
 
 
-def playlist_entries(job_id: str, req: DownloadRequest) -> tuple[str | None, list[tuple[str, str | None]]]:
-    """Título e (link, id) dos vídeos da playlist, sem baixar. Excluídos/privados entram e falham no download, com motivo."""
+class QuietLogger:
+    """Para buscas e tentativas com alternativas: os erros delas não viram falha da lista."""
+
+    def debug(self, message: str) -> None:
+        pass
+
+    info = warning = error = debug
+
+
+def search_videos(query: str, count: int) -> list[dict]:
+    """Vídeos do YouTube para um texto ("nome da música artista"), sem baixar: título, canal, duração e link."""
+    with yt_dlp.YoutubeDL({"extract_flat": "in_playlist", "quiet": True, "ignoreerrors": True, "noprogress": True, "logger": QuietLogger()}) as ydl:
+        info = ydl.extract_info(f"ytsearch{count}:{query}", download=False) or {}
+    videos = []
+    for entry in info.get("entries") or []:
+        if not entry or not entry.get("id") or entry.get("live_status") in {"is_live", "is_upcoming"}:
+            continue
+        videos.append({
+            "id": entry["id"],
+            "titulo": entry.get("title") or "",
+            "canal": entry.get("channel") or entry.get("uploader") or "",
+            "duracao": int(entry["duration"]) if entry.get("duration") else None,
+            "visualizacoes": entry.get("view_count"),
+            "link": f"https://youtu.be/{entry['id']}",
+        })
+    return videos
+
+
+def search_playlists(query: str, count: int) -> list[dict]:
+    """Playlists do YouTube para um texto (a busca do site com o filtro "playlist"): título, canal, capa e link."""
+    url = f"https://www.youtube.com/results?search_query={quote(query)}&sp=EgIQAw%3D%3D"
+    options_ = {"extract_flat": "in_playlist", "quiet": True, "ignoreerrors": True, "noprogress": True, "playlistend": count, "logger": QuietLogger()}
+    with yt_dlp.YoutubeDL(options_) as ydl:
+        info = ydl.extract_info(url, download=False) or {}
+    found = []
+    for entry in info.get("entries") or []:
+        if not entry or not entry.get("id") or "list=" not in (entry.get("url") or ""):
+            continue
+        thumbs = [t.get("url") for t in entry.get("thumbnails") or [] if t.get("url", "").startswith("https://i.ytimg.com/")]
+        found.append({
+            "id": entry["id"],
+            "titulo": entry.get("title") or "",
+            "canal": entry.get("channel") or entry.get("uploader") or "",
+            "capa": thumbs[0] if thumbs else None,
+            "link": f"https://www.youtube.com/playlist?list={entry['id']}",
+        })
+    return found[:count]
+
+
+def list_playlist(url: str, count: int) -> dict:
+    """Vídeos de uma playlist (ou canal), sem baixar: para a pessoa escolher quais quer."""
+    options_ = {"extract_flat": "in_playlist", "quiet": True, "ignoreerrors": True, "noprogress": True, "playlistend": count, "logger": QuietLogger()}
+    with yt_dlp.YoutubeDL(options_) as ydl:
+        info = ydl.extract_info(url, download=False) or {}
+    videos = []
+    for entry in info.get("entries") or []:
+        if not entry or not entry.get("id") or len(entry["id"]) != 11:
+            continue
+        videos.append({
+            "id": entry["id"],
+            "titulo": entry.get("title") or "",
+            "canal": entry.get("channel") or entry.get("uploader") or "",
+            "duracao": int(entry["duration"]) if entry.get("duration") else None,
+            "link": f"https://youtu.be/{entry['id']}",
+        })
+    return {"titulo": info.get("title") or "", "videos": videos}
+
+
+# Título que a playlist mostra no lugar de um vídeo privado ou excluído: não dá para procurar por ele.
+UNUSABLE_TITLE = re.compile(r"^\[(?:private|deleted|unavailable)[^\]]*\]$", re.IGNORECASE)
+
+
+def alternatives(title: str, duration: int | None, exclude: str) -> list[dict]:
+    """Outros vídeos da mesma música: busca por "artista título" (sem "(Official Video)" e afins) e fica com os de
+    duração parecida (até 15% ou 20 s de diferença); sem a duração original, os de até 15 min."""
+    name, artist = standardize(title)
+    found = search_videos(f"{artist or ''} {name}".strip(), 6)
+
+    def close(video: dict) -> bool:
+        if video["id"] == exclude or not video["duracao"]:
+            return False
+        if duration:
+            return abs(video["duracao"] - duration) <= max(20, duration * 0.15)
+        return video["duracao"] <= 15 * 60
+
+    return [video for video in found if close(video)]
+
+
+def lookup_title(video_id: str) -> str | None:
+    """Título "música - canal" de um vídeo que não baixou, para procurar outro (links avulsos não trazem o título).
+    O oEmbed do YouTube responde mesmo para muitos vídeos que o download recusa; excluído ou privado: None."""
+    url = f"https://www.youtube.com/oembed?format=json&url={quote(f'https://www.youtube.com/watch?v={video_id}', safe='')}"
+    try:
+        with urlopen(UrlRequest(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 - sem título, sem busca
+        return None
+    title = (data.get("title") or "").strip()
+    author = re.sub(r"\s*-\s*Topic$", "", (data.get("author_name") or "").strip())
+    # "Música" sem o artista no título: o canal costuma ser o artista (canais "Artista - Topic" do YouTube Music).
+    return f"{author} - {title}" if title and author and " - " not in title and author.lower() not in title.lower() else title or None
+
+
+def has_file(job_id: str, video_id: str) -> bool:
+    with lock:
+        return any(f.get("id") == video_id for f in jobs[job_id]["arquivos"])
+
+
+def try_alternative(job_id: str, req: DownloadRequest, video_id: str, title: str | None, duration: int | None) -> None:
+    """O áudio não baixou: tenta até 2 outros vídeos da mesma música. Deu certo, a falha sai da lista e vira
+    "alternativa" (link original → link usado); senão, o motivo diz que a busca foi feita."""
+    original = f"https://youtu.be/{video_id}"
+    if not title or UNUSABLE_TITLE.match(title.strip()):
+        title = lookup_title(video_id)
+    if not title:
+        return
+    try:
+        candidates = alternatives(title, duration, video_id)[:2]
+    except Exception:  # noqa: BLE001 - busca fora do ar: fica a falha original
+        candidates = []
+    for video in candidates:
+        with lock:
+            jobs[job_id].setdefault("trocas", {})[video["id"]] = video_id
+        try:
+            with yt_dlp.YoutubeDL({**options(job_id, req), "logger": QuietLogger()}) as ydl:
+                ydl.download([video["link"]])
+        finally:
+            with lock:
+                jobs[job_id]["trocas"].pop(video["id"], None)
+        if has_file(job_id, video_id):
+            with lock:
+                job = jobs[job_id]
+                job["falhas"] = [f for f in job["falhas"] if f.get("link") != original]
+                job["alternativas"].append({"link": original, "usado": video["link"], "titulo": video["titulo"]})
+            return
+    with lock:
+        for failure in jobs[job_id]["falhas"]:
+            if failure.get("link") == original and "procurei" not in failure["motivo"]:
+                failure["motivo"] += " (procurei outro vídeo pelo título e nenhum baixou)"
+                failure["titulo"] = title
+
+
+def playlist_entries(job_id: str, req: DownloadRequest) -> tuple[str | None, list[tuple[str, str | None, str | None, int | None]]]:
+    """Título e (link, id, título, duração) dos vídeos da playlist, sem baixar. Excluídos/privados entram e falham no
+    download, com motivo; o título e a duração servem para procurar outro vídeo da mesma música."""
     listing = {"extract_flat": "in_playlist", "quiet": True, "ignoreerrors": True, "logger": JobLogger(job_id), "playlistend": req.max_itens}
     with yt_dlp.YoutubeDL(listing) as ydl:
         info = ydl.extract_info(req.url, download=False) or {}
     entries = [entry for entry in info.get("entries") or [] if entry and (entry.get("url") or entry.get("id"))]
-    return info.get("title"), [(entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}", entry.get("id")) for entry in entries]
+    return info.get("title"), [
+        (entry.get("url") or f"https://www.youtube.com/watch?v={entry['id']}", entry.get("id"), entry.get("title"), int(entry["duration"]) if entry.get("duration") else None)
+        for entry in entries
+    ]
 
 
-def download_one(job_id: str, req: DownloadRequest, url: str, total: int) -> None:
+def single_entry(url: str) -> tuple[str, str | None, str | None, int | None]:
+    found = VIDEO_ID.search(url)
+    return url, found.group(1) if found else None, None, None
+
+
+def download_one(job_id: str, req: DownloadRequest, entry: tuple[str, str | None, str | None, int | None], total: int) -> None:
+    url, video_id, title, duration = entry
     single = req.model_copy(update={"playlist": False})
     with yt_dlp.YoutubeDL(options(job_id, single)) as ydl:
         ydl.download([url])
+    if single.formato != "mp4" and single.alternativas and video_id and not has_file(job_id, video_id):
+        try_alternative(job_id, single, video_id, title, duration)
     with lock:
         job = jobs[job_id]
         job["feitos"] = job.get("feitos", 0) + 1
@@ -206,16 +425,16 @@ def download_one(job_id: str, req: DownloadRequest, url: str, total: int) -> Non
 
 def run(job_id: str, req: DownloadRequest) -> None:
     try:
-        found = VIDEO_ID.search(req.url)
         if req.links:
-            title, entries = None, [(link, (VIDEO_ID.search(link) or [None, None])[1]) for link in req.links]
+            title, entries = None, [single_entry(link) for link in req.links]
         elif req.playlist:
             title, entries = playlist_entries(job_id, req)
         else:
-            title, entries = None, [(req.url, found.group(1) if found else None)]
+            title, entries = None, [single_entry(req.url)]
         # Já baixados antes (pular) e repetidos dentro da própria playlist: não baixa de novo.
-        known, urls, skipped, order = set(req.pular), [], [], []
-        for url, video_id in entries:
+        known, todo, skipped, order = set(req.pular), [], [], []
+        for entry in entries:
+            video_id = entry[1]
             if video_id and video_id not in order:
                 order.append(video_id)
             if video_id and video_id in known:
@@ -224,16 +443,16 @@ def run(job_id: str, req: DownloadRequest) -> None:
                 continue
             if video_id:
                 known.add(video_id)
-            urls.append(url)
+            todo.append(entry)
         with lock:
             jobs[job_id]["pulados"] = skipped
             # Para a biblioteca do K7: nome da playlist e a ordem original (os downloads em paralelo terminam fora de ordem).
             jobs[job_id]["titulo"] = title
             jobs[job_id]["ordem"] = order
-            jobs[job_id]["progresso"] = f"0/{len(urls)}"
+            jobs[job_id]["progresso"] = f"0/{len(todo)}"
         # Alguns vídeos ao mesmo tempo (PARALLEL); cada um no próprio YoutubeDL.
-        with ThreadPoolExecutor(max_workers=PARALLEL if req.playlist or len(urls) > 1 else 1) as pool:
-            list(pool.map(lambda url: download_one(job_id, req, url, len(urls)), urls))
+        with ThreadPoolExecutor(max_workers=PARALLEL if req.playlist or len(todo) > 1 else 1) as pool:
+            list(pool.map(lambda entry: download_one(job_id, req, entry, len(todo)), todo))
         with lock:
             job = jobs[job_id]
             job["status"] = "ok" if job["arquivos"] or job["pulados"] else "erro"
@@ -262,7 +481,33 @@ threading.Thread(target=cleanup_old_jobs, daemon=True).start()
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "yt_dlp": yt_dlp.version.__version__, "nucleos": CPU_CORES, "nivelar_paralelo": LEVEL_PARALLEL}
+    return {"status": "ok", "yt_dlp": yt_dlp.version.__version__, "nucleos": CPU_CORES, "nivelar_paralelo": LEVEL_PARALLEL, "nivelar_ao_baixar": LEVEL_ON_DOWNLOAD}
+
+
+@app.get("/pesquisar")
+def search(q: str, n: int = 5, tipo: str = "video") -> dict:
+    """Procura no YouTube (nome da música, artista...): até `n` vídeos (1 a 20) ou, com tipo=playlist, playlists."""
+    query = re.sub(r"\s+", " ", q).strip()[:200]
+    if not query:
+        raise HTTPException(400, "diga o que procurar (nome da música, artista ou vídeo)")
+    count = max(1, min(20, n))
+    try:
+        if tipo == "playlist":
+            return {"playlists": search_playlists(query, count)}
+        return {"videos": search_videos(query, count)}
+    except Exception as error:  # noqa: BLE001 - o YouTube recusou ou mudou: mensagem curta
+        raise HTTPException(502, f"a busca no YouTube falhou: {str(error)[:200]}") from error
+
+
+@app.get("/listar")
+def listing(url: str, n: int = 300) -> dict:
+    """Vídeos de uma playlist do YouTube (até `n`, 1 a 1000), sem baixar: para escolher quais baixar."""
+    if not re.match(r"^https?://(?:(?:www|m|music)\.)?(?:youtube\.com|youtu\.be)/", url):
+        raise HTTPException(400, "só links do YouTube")
+    try:
+        return list_playlist(url, max(1, min(1000, n)))
+    except Exception as error:  # noqa: BLE001
+        raise HTTPException(502, f"não consegui abrir a playlist: {str(error)[:200]}") from error
 
 
 # ── Nivelamento de volume (EBU R128, ffmpeg loudnorm em duas passadas) ─────────
@@ -310,8 +555,30 @@ def run_ffmpeg(args: list[str], cancel: threading.Event, timeout: int) -> tuple[
                 raise Cancelled() if cancel.is_set() else HTTPException(504, "o nivelamento passou do tempo")
 
 
-def level_file(source: Path, target: Path, cancel: threading.Event | None = None) -> dict:
-    """Mede o volume (1ª passada) e aplica a correção exata (2ª), sem distorcer. Devolve o volume antes e depois."""
+def encode(source: Path, target: Path, cancel: threading.Event, af: str | None = None, tags: list[str] | tuple = ()) -> None:
+    """Converte `source` para o formato de `target` (pela extensão), com filtro de áudio e etiquetas opcionais.
+
+    Mesmo formato: todas as faixas (vídeo copiado, capa). Formato diferente (original do YouTube → MP3/WAV): só o áudio.
+    """
+    ext = target.suffix.lower()
+    same = source.suffix.lower() == ext
+    rate = "48000" if ext in {".opus", ".webm"} else "44100"
+    args = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(source), "-map", "0" if same else "0:a:0", "-map_metadata", "0"]
+    if af:
+        args += ["-af", af]
+    args += ["-ar", rate, *AUDIO_CODECS[ext], *tags]
+    if tags and ext == ".mp3":
+        args += ["-id3v2_version", "3"]
+    code, err = run_ffmpeg([*args, str(target)], cancel, 3600)
+    if code != 0 or not target.is_file():
+        raise HTTPException(500, f"ffmpeg falhou ao converter: {err[-300:]}")
+
+
+def level_file(source: Path, target: Path, cancel: threading.Event | None = None, tags: list[str] | tuple = ()) -> dict:
+    """Mede o volume (1ª passada) e aplica a correção exata (2ª), sem distorcer. Devolve o volume antes e depois.
+
+    `target` pode ter outra extensão (converte junto, numa passada só) e `tags` grava título e artista.
+    """
     cancel = cancel or threading.Event()
     base = f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11"
     code, err = run_ffmpeg(
@@ -325,14 +592,7 @@ def level_file(source: Path, target: Path, cancel: threading.Event | None = None
         f"{base}:measured_I={m['input_i']}:measured_TP={m['input_tp']}:measured_LRA={m['input_lra']}"
         f":measured_thresh={m['input_thresh']}:offset={m['target_offset']}:linear=true"
     )
-    codec = AUDIO_CODECS[source.suffix.lower()]
-    rate = "48000" if source.suffix.lower() in {".opus", ".webm"} else "44100"
-    code, err = run_ffmpeg(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(source), "-map", "0", "-map_metadata", "0", "-af", measured, "-ar", rate, *codec, str(target)],
-        cancel, 3600,
-    )
-    if code != 0 or not target.is_file():
-        raise HTTPException(500, f"ffmpeg falhou ao nivelar: {err[-300:]}")
+    encode(source, target, cancel, af=measured, tags=tags)
     return {"antes": float(m["input_i"]), "depois": TARGET_LUFS}
 
 
@@ -484,7 +744,7 @@ def download(req: DownloadRequest) -> dict:
         raise HTTPException(400, "só links do YouTube (youtube.com, youtu.be, music.youtube.com)")
     job_id = uuid.uuid4().hex[:12]
     with lock:
-        jobs[job_id] = {"status": "rodando", "progresso": "0/?", "arquivos": [], "falhas": [], "pulados": [], "erro": None, "criado": time.time()}
+        jobs[job_id] = {"status": "rodando", "progresso": "0/?", "arquivos": [], "falhas": [], "pulados": [], "alternativas": [], "erro": None, "criado": time.time()}
     threading.Thread(target=run, args=(job_id, req), daemon=True).start()
     return {"id": job_id}
 
@@ -495,7 +755,7 @@ def status(job_id: str) -> dict:
         job = jobs.get(job_id)
         if not job:
             raise HTTPException(404, "trabalho não encontrado")
-        return {k: v for k, v in job.items() if k != "criado"}
+        return {k: v for k, v in job.items() if k not in {"criado", "trocas"}}
 
 
 @app.get("/trabalhos/{job_id}/arquivos/{nome}")

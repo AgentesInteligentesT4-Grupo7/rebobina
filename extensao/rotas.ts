@@ -2,11 +2,12 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { AudioLeveler, LEVELABLE } from './AudioLeveler.js';
-import { publishProgress } from './BaixarYoutube.js';
+import { YOUTUBE, downloadAll, planDownloads, publishProgress } from './BaixarYoutube.js';
 import { UserFacingError, userMessage } from './erros.js';
 import type { FitaApi, WebRotaCtx } from './k7.js';
 import type { MediaDownloader } from './MediaDownloader.js';
 import type { MediaLibrary } from './MediaLibrary.js';
+import type { MediaFormat, YtdlpClient } from './YtdlpClient.js';
 
 const ID = '([0-9a-f]{24})';
 
@@ -14,7 +15,15 @@ const ID = '([0-9a-f]{24})';
  * Rotas do painel da Rebobina no chat web (todas em /api/x/): biblioteca das playlists, faixas para o player,
  * .zip, nivelar, medir e padronizar arquivos da pasta do visitante, tentar de novo os links que falharam.
  */
-export function registrarRotas(k7: FitaApi, library: MediaLibrary, downloader: MediaDownloader, leveler: AudioLeveler, levelParallel: number): void {
+export function registrarRotas(
+  k7: FitaApi,
+  library: MediaLibrary,
+  downloader: MediaDownloader,
+  leveler: AudioLeveler,
+  levelParallel: number,
+  client?: YtdlpClient,
+  maxItems = 0,
+): void {
   const { rota } = k7.web;
   // Nivelamentos ao mesmo tempo por visitante: o número vem do serviço, pelos núcleos da máquina dele.
   const levelSlots = k7.util.limitador(levelParallel);
@@ -145,6 +154,66 @@ export function registrarRotas(k7: FitaApi, library: MediaLibrary, downloader: M
       }),
     ),
   );
+
+  // ── YouTube dentro do painel: procurar, abrir uma playlist e baixar o que a pessoa marcar (sem copiar links) ──
+  if (client) {
+    rota('GET', /^\/api\/x\/youtube\/pesquisar$/, async (ctx) => {
+      const query = (ctx.url.searchParams.get('q') ?? '').trim().slice(0, 200);
+      if (!query) return ctx.falhar(400, 'Diga o que procurar');
+      try {
+        if (ctx.url.searchParams.get('tipo') === 'playlist') return ctx.json({ playlists: await client.searchPlaylists(query, 12) });
+        ctx.json({ videos: await client.search(query, 15) });
+      } catch (error) {
+        ctx.falhar(502, `A busca no YouTube falhou agora (${userMessage(error)}). Tente de novo.`);
+      }
+    });
+
+    rota('GET', /^\/api\/x\/youtube\/playlist$/, async (ctx) => {
+      const url = (ctx.url.searchParams.get('url') ?? '').trim();
+      if (!YOUTUBE.test(url)) return ctx.falhar(400, 'Só links do YouTube');
+      try {
+        ctx.json(await client.listPlaylist(url, 500));
+      } catch (error) {
+        ctx.falhar(502, `Não consegui abrir a playlist (${userMessage(error)}).`);
+      }
+    });
+  }
+
+  // Baixar direto do painel (sem o modelo): vídeos marcados e playlists inteiras, cada playlist na própria entrada.
+  rota('POST', /^\/api\/x\/baixar$/, async (ctx) => {
+    const body = ((await ctx.lerJson()) ?? {}) as { links?: unknown; playlists?: unknown; formato?: unknown };
+    const formato: MediaFormat = body.formato === 'wav' || body.formato === 'mp4' ? body.formato : 'mp3';
+    let plans;
+    try {
+      plans = planDownloads({ links: body.links, playlists: body.playlists });
+    } catch (error) {
+      if (error instanceof UserFacingError) return ctx.falhar(400, error.userMessage);
+      throw error;
+    }
+    ctx.json(
+      await ctx.emFila(async () => {
+        try {
+          const outcome = await downloadAll(downloader, plans, { formato, maxItens: maxItems || undefined, userId: ctx.userId }, (progress, prefix) =>
+            publishProgress(ctx, progress, prefix),
+          );
+          return {
+            ok: true,
+            arquivos: outcome.files.length,
+            novos: outcome.fresh,
+            reaproveitados: outcome.reused,
+            alternativas: outcome.alternatives.length,
+            falhas: outcome.failures,
+            partes: outcome.parts,
+          };
+        } catch (error) {
+          if (error instanceof UserFacingError) return { ok: false, erro: error.userMessage };
+          throw error;
+        } finally {
+          ctx.limparProgresso();
+        }
+      }),
+    );
+  });
 
   // Direto, sem o modelo: baixa só os links que falharam e soma à mesma playlist.
   rota('POST', new RegExp(`^\\/api\\/x\\/biblioteca\\/${ID}\\/tentar-de-novo$`), async (ctx) =>

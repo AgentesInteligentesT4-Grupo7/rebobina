@@ -48,7 +48,19 @@
 
   function loadLibrary() {
     // Depois de cada leitura, grava na pasta escolhida o que ainda não está lá.
-    return api('/api/x/biblioteca').then(function (list) { lib.list = list; renderLibrary(); autoSave(); }).catch(function () {});
+    return api('/api/x/biblioteca').then(function (list) { lib.list = list; openDownloading(); renderLibrary(); autoSave(); }).catch(function () {});
+  }
+
+  /**
+   * A playlist que está baixando fica aberta (as músicas aparecem enquanto chegam). É a que surgiu ou mudou desde
+   * que a conversa começou a trabalhar (comparando com a foto tirada no início, sem depender do relógio).
+   * Se a pessoa fechar, continua fechada.
+   */
+  function openDownloading() {
+    if (!lib.snapshot) return;
+    lib.list.forEach(function (entry) {
+      if (lib.snapshot[entry.id] !== entry.criadoEm && lib.open[entry.id] === undefined) lib.open[entry.id] = true;
+    });
   }
 
   // ── Pasta do computador de quem usa (Chrome/Edge em localhost ou https) ─────
@@ -562,7 +574,13 @@
       card.appendChild(auth);
     } else {
       var entry = lib.localEntry || { id: 'pasta-local', titulo: '📁 ' + folder.name, formato: 'local', faixas: [], local: true };
-      appendEntry(card, entry);
+      // Os downloads também são gravados na pasta: na lista da pasta ficam só os outros arquivos, para a mesma
+      // música não aparecer em duas playlists (os botões abaixo continuam valendo para a pasta inteira).
+      var downloaded = {};
+      lib.list.forEach(function (e) { e.faixas.forEach(function (t) { downloaded[t.arquivo] = true; }); });
+      var others = entry.faixas.filter(function (t) { return (t.pastas && t.pastas.length) || !downloaded[t.arquivo]; });
+      if (others.length) appendEntry(card, others.length === entry.faixas.length ? entry : { id: entry.id, titulo: '📁 ' + folder.name + ' (outros arquivos)', formato: 'local', faixas: others, local: true });
+      else card.appendChild(el('div', 'pl-head', '<span class="pl-title">📁 ' + esc(folder.name) + '</span><span class="pl-meta">os downloads são gravados aqui</span>'));
       var tools = el('div', 'folder-tools');
       if (entry.faixas.length && fitaInfo.nivelar) {
         var busy = jobRunning();
@@ -747,11 +765,229 @@
     lib.entryId = null; lib.pos = -1; document.title = K7.state.info ? K7.state.info.nome : 'K7'; renderLibrary();
   };
 
+  // ── YouTube dentro do painel: procurar, ouvir antes, abrir playlists e baixar o que marcar ──────────────
+  // Sem copiar e colar links: a busca usa o serviço da fita (yt-dlp) e o vídeo toca no player do YouTube sem cookies.
+  $('lib-toggle').insertAdjacentHTML('beforebegin', '<button id="yt-toggle" class="hidden" type="button" title="Procurar no YouTube e escolher o que baixar">▶️ YouTube</button>');
+  $('main').insertAdjacentHTML('afterend',
+    '<aside id="yt" class="hidden" aria-label="YouTube">' +
+    '  <div id="yt-head">▶️ YouTube <button type="button" id="yt-close" title="Fechar">✕</button></div>' +
+    '  <form id="yt-form" autocomplete="off">' +
+    '    <input id="yt-q" type="search" placeholder="Música, artista ou link de playlist" aria-label="O que procurar">' +
+    '    <div id="yt-kind" role="radiogroup">' +
+    '      <label><input type="radio" name="yt-kind" value="video" checked> Vídeos</label>' +
+    '      <label><input type="radio" name="yt-kind" value="playlist"> Playlists</label>' +
+    '      <button type="submit" id="yt-go">Procurar</button>' +
+    '    </div>' +
+    '  </form>' +
+    '  <div id="yt-results"><div class="lib-empty">Procure uma música, um artista ou cole o link de uma playlist. Marque o que quiser e baixe tudo de uma vez.</div></div>' +
+    '  <div id="yt-basket" class="hidden">' +
+    '    <div id="yt-count"></div>' +
+    '    <div id="yt-actions">' +
+    '      <select id="yt-format" aria-label="Formato"><option value="mp3">MP3</option><option value="wav">WAV</option><option value="mp4">Vídeo</option></select>' +
+    '      <button type="button" id="yt-clear">Limpar</button>' +
+    '      <button type="button" id="yt-download">⬇️ Baixar</button>' +
+    '    </div>' +
+    '    <div id="yt-status"></div>' +
+    '  </div>' +
+    '</aside>');
+
+  var yt = { videos: {}, playlists: {}, view: null, busy: false };
+  var PLAYLIST_LINK = /^https?:\/\/(?:(?:www|m|music)\.)?youtube\.com\/.*[?&]list=([\w-]+)/i;
+  var VIDEO_LINK = /^https?:\/\/(?:(?:www|m|music)\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/)|youtu\.be\/)([\w-]{11})/i;
+  var WHOLE_ON = '✓ Inteira marcada', WHOLE_OFF = '＋ Playlist inteira';
+
+  function setYtOpen(open) {
+    $('yt').classList.toggle('hidden', !open);
+    $('yt-toggle').classList.toggle('on', open);
+    if (open) $('yt-q').focus();
+  }
+  $('yt-toggle').onclick = function () { setYtOpen($('yt').classList.contains('hidden')); };
+  $('yt-close').onclick = function () { setYtOpen(false); };
+
+  function clock(secs) {
+    if (!secs) return '';
+    var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = ('0' + (secs % 60)).slice(-2);
+    return h ? h + ':' + ('0' + m).slice(-2) + ':' + s : m + ':' + s;
+  }
+  function thumb(id) { return 'https://i.ytimg.com/vi/' + encodeURIComponent(id) + '/mqdefault.jpg'; }
+  function message(text) { $('yt-results').innerHTML = ''; $('yt-results').appendChild(el('div', 'lib-empty', esc(text))); }
+  function eachIn(selector, fn) { Array.prototype.forEach.call($('yt-results').querySelectorAll(selector), fn); }
+
+  function renderBasket() {
+    var v = Object.keys(yt.videos).length, p = Object.keys(yt.playlists).length;
+    $('yt-basket').classList.toggle('hidden', !v && !p && !yt.busy && !$('yt-status').textContent);
+    var parts = [];
+    if (v) parts.push(v + (v === 1 ? ' vídeo' : ' vídeos'));
+    if (p) parts.push(p + (p === 1 ? ' playlist inteira' : ' playlists inteiras'));
+    $('yt-count').textContent = parts.length ? 'Marcados: ' + parts.join(' e ') : 'Nada marcado';
+    $('yt-download').disabled = yt.busy || (!v && !p);
+    $('yt-clear').disabled = yt.busy || (!v && !p);
+  }
+
+  function wholeButton(link, name) {
+    var b = el('button', 'yt-mini'); b.type = 'button';
+    b.title = 'Baixa a playlist toda, como uma playlist própria na biblioteca';
+    function paint() { b.textContent = yt.playlists[link] ? WHOLE_ON : WHOLE_OFF; b.classList.toggle('on', !!yt.playlists[link]); }
+    b.onclick = function () {
+      if (yt.playlists[link]) delete yt.playlists[link]; else yt.playlists[link] = name || link;
+      paint(); renderBasket();
+    };
+    paint();
+    return b;
+  }
+
+  /** Linha de um vídeo: miniatura (toca o vídeo ali mesmo), título, canal · duração e a caixa de marcar. */
+  function videoRow(video) {
+    var row = el('div', 'yt-row');
+    var pic = el('button', 'yt-thumb'); pic.type = 'button'; pic.title = 'Ver o vídeo aqui';
+    pic.innerHTML = '<img loading="lazy" alt="" src="' + esc(thumb(video.id)) + '"><span>▶</span>';
+    var info = el('label', 'yt-info');
+    var box = document.createElement('input'); box.type = 'checkbox'; box.checked = !!yt.videos[video.link];
+    box.onchange = function () { if (box.checked) yt.videos[video.link] = video.titulo; else delete yt.videos[video.link]; renderBasket(); };
+    var text = el('span', 'yt-text', '<b>' + esc(video.titulo || video.link) + '</b><small>' + esc([video.canal, clock(video.duracao)].filter(Boolean).join(' · ')) + '</small>');
+    info.appendChild(box); info.appendChild(text);
+    row.appendChild(pic); row.appendChild(info);
+    pic.onclick = function () {
+      var open = row.querySelector('.yt-embed');
+      if (open) { open.remove(); row.querySelector('.yt-out').remove(); return; }
+      var frame = document.createElement('iframe');
+      frame.className = 'yt-embed';
+      frame.src = 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(video.id) + '?autoplay=1&rel=0';
+      frame.allow = 'autoplay; encrypted-media; picture-in-picture';
+      frame.allowFullscreen = true;
+      // O player do YouTube não toca sem saber de qual site veio (a página do chat não manda referência por padrão).
+      frame.referrerPolicy = 'strict-origin-when-cross-origin';
+      frame.title = video.titulo || 'Vídeo';
+      row.appendChild(frame);
+      // Alguns donos não deixam o vídeo tocar fora do YouTube: o link abre lá.
+      var out = el('a', 'yt-out', 'Não tocou aqui? Abrir no YouTube ↗');
+      out.href = 'https://www.youtube.com/watch?v=' + encodeURIComponent(video.id); out.target = '_blank'; out.rel = 'noopener';
+      row.appendChild(out);
+    };
+    return row;
+  }
+
+  /** Linha de uma playlist: abrir para escolher as músicas, ou marcar a playlist inteira. */
+  function playlistRow(pl) {
+    var row = el('div', 'yt-row');
+    var pic = el('div', 'yt-thumb yt-pl', pl.capa ? '<img loading="lazy" alt="" src="' + esc(pl.capa) + '"><span>☰</span>' : '<span>☰</span>');
+    var info = el('div', 'yt-info');
+    info.appendChild(el('span', 'yt-text', '<b>' + esc(pl.titulo || 'Playlist') + '</b><small>' + esc(pl.canal || '') + '</small>'));
+    var tools = el('div', 'yt-tools');
+    var see = el('button', 'yt-mini', 'Escolher músicas'); see.type = 'button';
+    see.onclick = function () { openPlaylist(pl.link, pl.titulo); };
+    tools.appendChild(see); tools.appendChild(wholeButton(pl.link, pl.titulo));
+    info.appendChild(tools);
+    row.appendChild(pic); row.appendChild(info);
+    return row;
+  }
+
+  function showVideos(videos, header) {
+    var box = $('yt-results'); box.innerHTML = '';
+    if (header) box.appendChild(header);
+    if (!videos.length) { box.appendChild(el('div', 'lib-empty', 'Nada encontrado.')); return; }
+    videos.forEach(function (v) { box.appendChild(videoRow(v)); });
+  }
+  function showPlaylists(playlists) {
+    var box = $('yt-results'); box.innerHTML = '';
+    if (!playlists.length) return message('Nenhuma playlist encontrada.');
+    playlists.forEach(function (pl) { box.appendChild(playlistRow(pl)); });
+  }
+  function showView(view) {
+    if (view.kind === 'playlist') showPlaylists(view.data.playlists || []); else showVideos(view.data.videos || []);
+  }
+
+  function search(event) {
+    if (event) event.preventDefault();
+    var q = $('yt-q').value.trim();
+    if (!q) return;
+    var list = PLAYLIST_LINK.exec(q), video = VIDEO_LINK.exec(q);
+    if (list && !video) return openPlaylist(q, '');
+    if (video) return showVideos([{ id: video[1], titulo: q, canal: '', duracao: null, link: 'https://youtu.be/' + video[1] }]);
+    var kind = document.querySelector('input[name="yt-kind"]:checked').value;
+    message('🔎 Procurando…');
+    $('yt-go').disabled = true;
+    api('/api/x/youtube/pesquisar?tipo=' + kind + '&q=' + encodeURIComponent(q))
+      .then(function (r) { yt.view = { kind: kind, data: r }; showView(yt.view); })
+      .catch(function (err) { message('⚠️ ' + err.message); })
+      .then(function () { $('yt-go').disabled = false; });
+  }
+  $('yt-form').onsubmit = search;
+
+  /** Músicas de uma playlist com caixas de marcar (marcar todos / desmarcar) e o atalho "playlist inteira". */
+  function openPlaylist(link, title) {
+    var back = yt.view;
+    message('☰ Abrindo a playlist…');
+    api('/api/x/youtube/playlist?url=' + encodeURIComponent(link)).then(function (r) {
+      var name = r.titulo || title || 'Playlist';
+      var head = el('div', 'yt-plhead');
+      var top = el('div', 'yt-plrow');
+      if (back) {
+        var ret = el('button', 'yt-mini', '← Resultados'); ret.type = 'button';
+        ret.onclick = function () { yt.view = back; showView(back); };
+        top.appendChild(ret);
+      }
+      top.appendChild(el('b', '', esc(name) + ' <small>· ' + r.videos.length + ' vídeos</small>'));
+      head.appendChild(top);
+      var tools = el('div', 'yt-plrow');
+      var all = el('button', 'yt-mini', 'Marcar todos'); all.type = 'button';
+      var none = el('button', 'yt-mini', 'Desmarcar'); none.type = 'button';
+      function mark(on) {
+        r.videos.forEach(function (v) { if (on) yt.videos[v.link] = v.titulo; else delete yt.videos[v.link]; });
+        eachIn('.yt-row input[type=checkbox]', function (b) { b.checked = on; });
+        renderBasket();
+      }
+      all.onclick = function () { mark(true); };
+      none.onclick = function () { mark(false); };
+      tools.appendChild(all); tools.appendChild(none); tools.appendChild(wholeButton(link, name));
+      head.appendChild(tools);
+      showVideos(r.videos, head);
+    }).catch(function (err) { message('⚠️ ' + err.message); });
+  }
+
+  function clearMarks() {
+    yt.videos = {}; yt.playlists = {};
+    eachIn('input[type=checkbox]', function (b) { b.checked = false; });
+    eachIn('.yt-mini.on', function (b) { b.classList.remove('on'); b.textContent = WHOLE_OFF; });
+  }
+  $('yt-clear').onclick = function () { clearMarks(); $('yt-status').textContent = ''; renderBasket(); };
+
+  /** Baixa tudo que está marcado direto no serviço (sem passar pelo modelo); a biblioteca mostra chegando. */
+  $('yt-download').onclick = function () {
+    var links = Object.keys(yt.videos), playlists = Object.keys(yt.playlists);
+    if (!links.length && !playlists.length) return;
+    yt.busy = true; renderBasket();
+    $('yt-status').textContent = '⬇️ Começando…';
+    // A playlist que surgir abre sozinha na biblioteca (como nos downloads pelo chat).
+    lib.snapshot = {};
+    lib.list.forEach(function (entry) { lib.snapshot[entry.id] = entry.criadoEm; });
+    setLibOpen(true);
+    var tick = setInterval(function () {
+      api('/api/progresso').then(function (p) {
+        if (p && p.texto) $('yt-status').textContent = p.texto + (p.total ? ' ' + Math.min(100, Math.round((p.feitos / p.total) * 100)) + '%' : '');
+      }).catch(function () {});
+      loadLibrary();
+    }, 3000);
+    api('/api/x/baixar', { method: 'POST', body: { links: links, playlists: playlists, formato: $('yt-format').value } })
+      .then(function (r) {
+        if (!r.ok) { $('yt-status').textContent = '⚠️ ' + (r.erro || 'Não consegui baixar.'); return; }
+        var text = '✅ ' + r.arquivos + ' arquivo(s) na biblioteca';
+        if (r.reaproveitados) text += ' (' + r.reaproveitados + ' já tinham sido baixados)';
+        if (r.alternativas) text += '. ' + r.alternativas + ' vieram de outro vídeo da mesma música';
+        if (r.falhas.length) text += '. ' + r.falhas.length + ' não baixaram: veja na playlist da biblioteca';
+        $('yt-status').textContent = text + '.';
+        clearMarks();
+      })
+      .catch(function (err) { $('yt-status').textContent = '⚠️ ' + err.message; })
+      .then(function () { clearInterval(tick); yt.busy = false; renderBasket(); loadLibrary(); });
+  };
+
   // ── Início ────────────────────────────────────────────────────────────────
   K7.onReady(function () {
     api('/api/x/info').then(function (info) {
       fitaInfo = info || {};
       $('lib-toggle').classList.remove('hidden');
+      $('yt-toggle').classList.remove('hidden');
       var saved = null; try { saved = localStorage.getItem('libOpen'); } catch (e) {}
       // Aberta por padrão em tela larga; no celular, só quando a pessoa toca no botão.
       setLibOpen(saved ? saved === '1' : matchMedia('(min-width: 1100px)').matches);
@@ -761,7 +997,11 @@
   // Biblioteca cresce enquanto baixa; recarrega quando chegam arquivos na resposta.
   var poll = null;
   K7.onBusy(function (busy) {
-    if (busy && !poll) poll = setInterval(loadLibrary, 5000);
+    if (busy && !poll) {
+      lib.snapshot = {};
+      lib.list.forEach(function (entry) { lib.snapshot[entry.id] = entry.criadoEm; });
+      poll = setInterval(loadLibrary, 5000);
+    }
     if (!busy && poll) { clearInterval(poll); poll = null; }
   });
   K7.onReply(function (reply) { if ((reply.arquivos || []).length) loadLibrary(); });

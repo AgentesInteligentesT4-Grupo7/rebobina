@@ -24,6 +24,36 @@ export interface DownloadedFile {
   id?: string;
   titulo?: string;
   bytes: number;
+  /** Volume nivelado (−14 LUFS) no próprio download. */
+  nivelado?: boolean;
+}
+
+/** Áudio que não baixou e foi trocado por outro vídeo da mesma música, achado pelo título. */
+export interface DownloadAlternative {
+  link: string;
+  usado: string;
+  titulo: string;
+}
+
+/** Vídeo encontrado na busca do YouTube. */
+export interface FoundVideo {
+  id: string;
+  titulo: string;
+  canal: string;
+  /** Segundos (null quando o YouTube não informa). */
+  duracao: number | null;
+  visualizacoes?: number | null;
+  link: string;
+}
+
+/** Playlist achada na busca do YouTube. */
+export interface FoundPlaylist {
+  id: string;
+  titulo: string;
+  canal: string;
+  /** Miniatura (i.ytimg.com) ou null. */
+  capa: string | null;
+  link: string;
 }
 
 /** Vídeo pulado (excluído, privado, com restrição de idade, bloqueado...). */
@@ -34,8 +64,9 @@ export interface DownloadFailure {
 
 export interface DownloadResult {
   /** Arquivos novos, copiados para a pasta, com o ID do vídeo de cada um. */
-  files: Array<{ path: string; id?: string }>;
+  files: Array<{ path: string; id?: string; nivelado?: boolean }>;
   failures: DownloadFailure[];
+  alternatives?: DownloadAlternative[];
   /** IDs pedidos em `pular` que estavam no link: já existiam, não foram baixados. */
   skipped: string[];
   /** Nome da playlist (só em playlist). */
@@ -49,6 +80,7 @@ interface Job {
   progresso: string;
   arquivos: DownloadedFile[];
   falhas?: DownloadFailure[];
+  alternativas?: DownloadAlternative[];
   pulados?: string[];
   titulo?: string | null;
   ordem?: string[];
@@ -91,6 +123,7 @@ export class YtdlpClient {
     const result = (job: Job): DownloadResult => ({
       files: [...saved],
       failures: job.falhas ?? [],
+      alternatives: job.alternativas ?? [],
       skipped: job.pulados ?? [],
       ...(job.titulo ? { title: job.titulo } : {}),
       order: job.ordem ?? [],
@@ -101,7 +134,7 @@ export class YtdlpClient {
       for (const file of job.arquivos) {
         if (copied.has(file.nome)) continue;
         fs.mkdirSync(targetDir, { recursive: true });
-        saved.push({ path: await this.fetchFile(id, file.nome, file.bytes, targetDir), ...(file.id ? { id: file.id } : {}) });
+        saved.push({ path: await this.fetchFile(id, file.nome, file.bytes, targetDir), ...(file.id ? { id: file.id } : {}), ...(file.nivelado ? { nivelado: true } : {}) });
         copied.add(file.nome);
         added = true;
       }
@@ -120,6 +153,27 @@ export class YtdlpClient {
     } finally {
       await fetch(`${this.options.baseUrl}/trabalhos/${id}`, { method: 'DELETE' }).catch(() => undefined);
     }
+  }
+
+  /** Vídeos do YouTube para um texto (nome da música, artista...), sem baixar nada. */
+  async search(query: string, count = 5): Promise<FoundVideo[]> {
+    const params = new URLSearchParams({ q: query, n: String(count) });
+    const { videos } = (await this.json(`/pesquisar?${params}`, { method: 'GET' }, 60_000)) as { videos?: FoundVideo[] };
+    return videos ?? [];
+  }
+
+  /** Playlists do YouTube para um texto (a busca do site com o filtro "playlist"). */
+  async searchPlaylists(query: string, count = 10): Promise<FoundPlaylist[]> {
+    const params = new URLSearchParams({ q: query, n: String(count), tipo: 'playlist' });
+    const { playlists } = (await this.json(`/pesquisar?${params}`, { method: 'GET' }, 60_000)) as { playlists?: FoundPlaylist[] };
+    return playlists ?? [];
+  }
+
+  /** Vídeos de uma playlist, sem baixar (para escolher quais baixar). */
+  async listPlaylist(url: string, count = 300): Promise<{ titulo: string; videos: FoundVideo[] }> {
+    const params = new URLSearchParams({ url, n: String(count) });
+    const listing = (await this.json(`/listar?${params}`, { method: 'GET' }, 120_000)) as { titulo?: string; videos?: FoundVideo[] };
+    return { titulo: listing.titulo ?? '', videos: listing.videos ?? [] };
   }
 
   async healthCheck(): Promise<string> {

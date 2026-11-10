@@ -22,7 +22,7 @@ export class K7Falso {
   readonly rotas: Rota[] = [];
   readonly ferramentas: FitaTool[] = [];
   readonly progresso = new Map<string, { texto: string; contagem?: { done: number; total: number } }>();
-  painel?: { script?: string; estilo?: string };
+  painel?: { script?: string; estilo?: string; imagens?: string[]; quadros?: string[] };
   private server?: http.Server;
 
   constructor(private readonly dirs: { dir?: string; workspaceDir?: string } = {}) {}

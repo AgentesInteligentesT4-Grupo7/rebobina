@@ -3,7 +3,7 @@ import path from 'node:path';
 import { UserFacingError } from './erros.js';
 import { type AudioLeveler, LEVELABLE } from './AudioLeveler.js';
 import type { LibraryEntry, MediaLibrary } from './MediaLibrary.js';
-import type { DownloadFailure, MediaFormat, YtdlpClient } from './YtdlpClient.js';
+import type { DownloadAlternative, DownloadFailure, MediaFormat, YtdlpClient } from './YtdlpClient.js';
 
 /**
  * Índice dos downloads da pasta (`.k7-indice.json`): ID do vídeo + formato → arquivo. É o que evita baixar
@@ -74,6 +74,10 @@ export interface MediaDownloadOutcome {
   fresh: number;
   reused: number;
   failures: DownloadFailure[];
+  /** Áudios que não baixaram e vieram de outro vídeo da mesma música. */
+  alternatives: DownloadAlternative[];
+  /** Arquivos novos com o volume nivelado no download. */
+  leveled: number;
   entry?: LibraryEntry;
 }
 
@@ -99,6 +103,7 @@ export class MediaDownloader {
     const known = index.ids(formato);
     const previous = request.entryId && userId && this.library ? this.library.files(userId, request.entryId) : [];
     let entry: LibraryEntry | undefined = request.entryId && userId ? this.library?.get(userId, request.entryId) : undefined;
+    const wasLeveled = entry?.nivelada === true;
     const label = request.links?.length ? `${request.links.length} link(s) de ${new Date().toLocaleDateString('pt-BR')}` : undefined;
 
     // Ordem: a da playlist (os downloads em paralelo terminam fora de ordem); sem ID, vai para o fim.
@@ -127,7 +132,18 @@ export class MediaDownloader {
     const { files, reused } = arrange(result.files, result.skipped, result.order ?? []);
     index.save();
     record(files, result.title, result.failures);
-    return { files, fresh: result.files.length, reused: reused.length, failures: result.failures, ...(entry ? { entry } : {}) };
+    // Áudio nivelado já no download: tudo novo e nivelado (e o que já estava, nivelado antes) = a playlist está nivelada.
+    const allLeveled = formato !== 'mp4' && result.files.length > 0 && result.files.every((f) => f.nivelado) && !reused.length && (!previous.length || wasLeveled);
+    if (allLeveled && entry && userId) this.library?.markLeveled(userId, entry.id);
+    return {
+      files,
+      fresh: result.files.length,
+      reused: reused.length,
+      failures: result.failures,
+      alternatives: result.alternatives ?? [],
+      leveled: result.files.filter((f) => f.nivelado).length,
+      ...(entry ? { entry } : {}),
+    };
   }
 
   /**
